@@ -1,9 +1,27 @@
-计算机网络实验检查表(Socket编程).pdf
-模块一 Socket编程实验指导手册.pdf
+# 原始材料（保留用于参考）
 Socket Demo.zip
 Socket-C++Demo.rar
 Socket-JavaDemo.rar
-Socket编程实例讲解-2023更新.pptx
 VerySimpleServer(V2)-2023更新.rar
-计算机网络实验检查表(Socket编程).docx
-模块一 Socket编程实验指导手册.docx
+Socket编程实例讲解-2023更新.pptx
+模块一 Socket编程实验指导手册.pdf
+计算机网络实验检查表(Socket编程).pdf
+
+# 编译生成的文件
+*.o
+webserver
+*.exe
+*.dSYM
+
+# 日志文件
+*.log
+
+# 测试图片（临时文件）
+*.jpg
+*.jpeg
+*.png
+*.gif
+
+# 系统文件
+.DS_Store
+Thumbs.db
