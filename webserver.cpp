@@ -11,27 +11,56 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/select.h>
 #include <dirent.h>
 
 using namespace std;
 
-// 服务器配置
 class ServerConfig {
 private:
     string listen_address;
     int listen_port;
     string web_root;
+    string config_file;
+    time_t last_modify_time;
 
 public:
-    ServerConfig() : listen_address("0.0.0.0"), listen_port(8080), web_root("www") {}
+    ServerConfig() : listen_address("0.0.0.0"), listen_port(8080), web_root("www"), last_modify_time(0) {}
     
-    // 读取配置
+    bool isConfigModified(const string& filename) {
+        struct stat file_stat;
+        if (stat(filename.c_str(), &file_stat) != 0) {
+            return false;
+        }
+        
+        if (file_stat.st_mtime != last_modify_time) {
+            last_modify_time = file_stat.st_mtime;
+            return true;
+        }
+        
+        return false;
+    }
+    
     bool loadFromFile(const string& filename) {
+        config_file = filename;
+        
+        struct stat file_stat;
+        if (stat(filename.c_str(), &file_stat) != 0) {
+            cerr << "警告: 无法打开配置文件 " << filename << "，使用默认配置" << endl;
+            return false;
+        }
+        
+        last_modify_time = file_stat.st_mtime;
+        
         ifstream file(filename);
         if (!file.is_open()) {
             cerr << "警告: 无法打开配置文件 " << filename << "，使用默认配置" << endl;
             return false;
         }
+        
+        string new_listen_address = listen_address;
+        int new_listen_port = listen_port;
+        string new_web_root = web_root;
         
         string line;
         while (getline(file, line)) {
@@ -49,24 +78,43 @@ public:
             value.erase(value.find_last_not_of(" \t\r\n") + 1);
             
             if (key == "listen_address") {
-                listen_address = value;
+                new_listen_address = value;
             } else if (key == "listen_port") {
-                listen_port = stoi(value);
+                try {
+                    new_listen_port = stoi(value);
+                } catch (...) {
+                    cerr << "警告: 无效的端口号 " << value << "，保持当前配置" << endl;
+                    continue;
+                }
             } else if (key == "web_root") {
-                web_root = value;
+                new_web_root = value;
             }
         }
         
         file.close();
+        
+        if (new_listen_address != listen_address) {
+            cout << "[配置更新] 监听地址: " << listen_address << " -> " << new_listen_address << endl;
+            listen_address = new_listen_address;
+        }
+        if (new_listen_port != listen_port) {
+            cout << "[配置更新] 监听端口: " << listen_port << " -> " << new_listen_port << endl;
+            listen_port = new_listen_port;
+        }
+        if (new_web_root != web_root) {
+            cout << "[配置更新] Web根目录: " << web_root << " -> " << new_web_root << endl;
+            web_root = new_web_root;
+        }
+        
         return true;
     }
     
     string getListenAddress() const { return listen_address; }
     int getListenPort() const { return listen_port; }
     string getWebRoot() const { return web_root; }
+    string getConfigFile() const { return config_file; }
 };
 
-// HTTP 响应
 class HTTPResponse {
 public:
     static string getStatusMessage(int code) {
@@ -85,7 +133,6 @@ public:
         return "Unknown";
     }
     
-    // 获取 Content-Type
     static string getContentType(const string& filename) {
         size_t pos = filename.find_last_of('.');
         if (pos == string::npos) {
@@ -122,14 +169,60 @@ public:
     }
 };
 
-// Web 服务器
 class WebServer {
 private:
     ServerConfig config;
     int server_fd;
     struct sockaddr_in server_addr;
+    int old_port;
     
-    // 获取当前时间
+    bool reinitialize() {
+        int new_port = config.getListenPort();
+        
+        if (new_port == old_port) {
+            return true;
+        }
+        
+        cout << "[配置热重载] 检测到端口改变，正在重新绑定socket..." << endl;
+        
+        if (server_fd >= 0) {
+            close(server_fd);
+        }
+        
+        server_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (server_fd < 0) {
+            cerr << "无法创建 socket" << endl;
+            return false;
+        }
+        
+        int opt = 1;
+        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        
+        memset(&server_addr, 0, sizeof(server_addr));
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = inet_addr(config.getListenAddress().c_str());
+        server_addr.sin_port = htons(config.getListenPort());
+        
+        if (::bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            cerr << "无法绑定地址 " << config.getListenAddress() 
+            << ":" << config.getListenPort() << endl;
+            close(server_fd);
+            server_fd = -1;
+            return false;
+        }
+        
+        if (listen(server_fd, 10) < 0) {
+            cerr << "无法监听" << endl;
+            close(server_fd);
+            server_fd = -1;
+            return false;
+        }
+        
+        old_port = new_port;
+        cout << "[配置热重载] 服务器已重新绑定到端口 " << new_port << endl;
+        return true;
+    }
+    
     string getCurrentTime() {
         time_t now = time(nullptr);
         string result(30, '\0');
@@ -137,20 +230,17 @@ private:
         return result.substr(0, result.find('\0'));
     }
     
-    // 检查文件是否存在
     bool fileExists(const string& filename) {
         ifstream file(filename);
         return file.good();
     }
     
-    // 获取文件大小
     size_t getFileSize(const string& filename) {
         ifstream file(filename, ios::binary | ios::ate);
         if (!file.is_open()) return 0;
         return file.tellg();
     }
     
-    // 读取文件内容
     string readFile(const string& filename) {
         ifstream file(filename, ios::binary);
         if (!file.is_open()) {
@@ -162,7 +252,6 @@ private:
         return oss.str();
     }
     
-    // 解析 HTTP 请求
     bool parseRequest(const string& request, string& method, string& path) {
         istringstream iss(request);
         iss >> method >> path;
@@ -174,7 +263,6 @@ private:
         return true;
     }
     
-    // 生成响应头
     string generateResponseHeader(int statusCode, const string& contentType, size_t contentLength) {
         ostringstream header;
         header << "HTTP/1.1 " << statusCode << " " << HTTPResponse::getStatusMessage(statusCode) << "\r\n";
@@ -188,7 +276,6 @@ private:
         return header.str();
     }
     
-    // 生成错误页面
     string generateErrorPage(int code, const string& message) {
         ostringstream html;
         html << "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='UTF-8'>";
@@ -200,10 +287,11 @@ private:
     }
     
 public:
-    WebServer() : server_fd(-1) {}
+    WebServer() : server_fd(-1), old_port(0) {}
     
     bool initialize() {
         config.loadFromFile("server_config.txt");
+        old_port = config.getListenPort();
         
         server_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (server_fd < 0) {
@@ -243,6 +331,7 @@ public:
         cout << "Web 根目录: " << config.getWebRoot() << endl;
         cout << "========================================" << endl;
         cout << "访问地址: http://localhost:" << config.getListenPort() << endl;
+        cout << "提示: 修改 server_config.txt 可实时更新配置（无需重启）" << endl;
         cout << "按 Ctrl+C 停止服务器" << endl;
         cout << "========================================" << endl;
         
@@ -250,6 +339,42 @@ public:
         socklen_t addr_len = sizeof(client_addr);
         
         while (true) {
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            FD_SET(server_fd, &read_fds);
+            
+            struct timeval timeout;
+            timeout.tv_sec = 1;
+            timeout.tv_usec = 0;
+            
+            int select_result = select(server_fd + 1, &read_fds, nullptr, nullptr, &timeout);
+            
+            if (select_result == 0) {
+                if (config.isConfigModified(config.getConfigFile())) {
+                    cout << "[配置检测] 检测到配置文件变化，正在重新加载..." << endl;
+                    config.loadFromFile(config.getConfigFile());
+                    
+                    if (config.getListenPort() != old_port) {
+                        int saved_port = old_port;
+                        if (!reinitialize()) {
+                            cerr << "[配置热重载] 重新绑定失败，保持旧端口配置" << endl;
+                            old_port = saved_port;
+                        } else {
+                            cout << "[配置热重载] 配置已成功更新！" << endl;
+                            cout << "新的访问地址: http://localhost:" << config.getListenPort() << endl;
+                        }
+                    } else {
+                        cout << "[配置热重载] 配置已成功更新！" << endl;
+                    }
+                }
+                continue;
+            }
+            
+            if (select_result < 0) {
+                cerr << "select 错误" << endl;
+                continue;
+            }
+            
             int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &addr_len);
             if (client_fd < 0) {
                 cerr << "接受连接失败" << endl;
