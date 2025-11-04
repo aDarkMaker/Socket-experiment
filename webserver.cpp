@@ -252,9 +252,38 @@ private:
         return oss.str();
     }
     
-    bool parseRequest(const string& request, string& method, string& path) {
+    bool parseRequest(const string& request, string& method, string& path, string& requestLine) {
         istringstream iss(request);
-        iss >> method >> path;
+        getline(iss, requestLine);
+        
+        if (requestLine.empty()) {
+            return false;
+        }
+        
+        size_t firstSpace = requestLine.find(' ');
+        if (firstSpace == string::npos) {
+            return false;
+        }
+        
+        method = requestLine.substr(0, firstSpace);
+        
+        size_t secondSpace = requestLine.find(' ', firstSpace + 1);
+        if (secondSpace == string::npos) {
+            path = requestLine.substr(firstSpace + 1);
+        } else {
+            path = requestLine.substr(firstSpace + 1, secondSpace - firstSpace - 1);
+        }
+        
+        size_t versionPos = requestLine.find("HTTP/");
+        if (versionPos != string::npos) {
+            size_t lineEnd = requestLine.find("\r");
+            if (lineEnd == string::npos) {
+                lineEnd = requestLine.find("\n");
+            }
+            if (lineEnd != string::npos && lineEnd > versionPos) {
+                requestLine = requestLine.substr(0, lineEnd);
+            }
+        }
         
         if (method.empty() || path.empty()) {
             return false;
@@ -417,23 +446,28 @@ public:
             ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
             
             if (bytes_received <= 0) {
+                cout << "[" << getCurrentTime() << "] ";
+                cout << client_ip << ":" << client_port << " ";
+                cout << "[连接关闭] 未收到有效请求数据" << endl;
                 close(client_fd);
                 continue;
             }
             
             string request(buffer);
             
-            string method, path;
-            bool parse_success = parseRequest(request, method, path);
+            string method, path, requestLine;
+            bool parse_success = parseRequest(request, method, path, requestLine);
             
             cout << "[" << getCurrentTime() << "] ";
-            cout << client_ip << ":" << client_port << " ";
-            cout << method << " " << path;
+            cout << "来源: " << client_ip << ":" << client_port << " | ";
+            cout << "请求: " << requestLine << endl;
             
             if (!parse_success) {
-                cout << " [400 Bad Request]" << endl;
+                string errorMsg = "HTTP请求格式错误: 无法解析请求行";
+                cout << "  └─ 错误原因: " << errorMsg << " | ";
+                cout << "响应: 400 Bad Request" << endl;
                 
-                string errorPage = generateErrorPage(400, "请求格式错误");
+                string errorPage = generateErrorPage(400, errorMsg);
                 string header = generateResponseHeader(400, "text/html; charset=utf-8", errorPage.length());
                 string response = header + errorPage;
                 send(client_fd, response.c_str(), response.length(), 0);
@@ -443,9 +477,11 @@ public:
             }
             
             if (method != "GET") {
-                cout << " [501 Not Implemented]" << endl;
+                string errorMsg = "不支持的方法: " + method + " (仅支持 GET)";
+                cout << "  └─ 错误原因: " << errorMsg << " | ";
+                cout << "响应: 501 Not Implemented" << endl;
                 
-                string errorPage = generateErrorPage(501, "不支持的方法");
+                string errorPage = generateErrorPage(501, errorMsg);
                 string header = generateResponseHeader(501, "text/html; charset=utf-8", errorPage.length());
                 string response = header + errorPage;
                 send(client_fd, response.c_str(), response.length(), 0);
@@ -462,9 +498,11 @@ public:
             }
             
             if (full_path.find("..") != string::npos) {
-                cout << " [403 Forbidden]" << endl;
+                string errorMsg = "路径包含非法字符 \"..\"，禁止访问: " + path;
+                cout << "  └─ 错误原因: " << errorMsg << " | ";
+                cout << "响应: 403 Forbidden" << endl;
                 
-                string errorPage = generateErrorPage(403, "禁止访问");
+                string errorPage = generateErrorPage(403, "禁止访问：路径包含非法字符");
                 string header = generateResponseHeader(403, "text/html; charset=utf-8", errorPage.length());
                 string response = header + errorPage;
                 send(client_fd, response.c_str(), response.length(), 0);
@@ -473,10 +511,26 @@ public:
                 continue;
             }
             
-            if (!fileExists(full_path)) {
-                cout << " [404 Not Found]" << endl;
+            if (stat(full_path.c_str(), &st) != 0) {
+                string errorMsg = "文件不存在: " + full_path + " (路径: " + path + ")";
+                cout << "  └─ 错误原因: " << errorMsg << " | ";
+                cout << "响应: 404 Not Found" << endl;
                 
-                string errorPage = generateErrorPage(404, "文件未找到");
+                string errorPage = generateErrorPage(404, "文件未找到: " + path);
+                string header = generateResponseHeader(404, "text/html; charset=utf-8", errorPage.length());
+                string response = header + errorPage;
+                send(client_fd, response.c_str(), response.length(), 0);
+                
+                close(client_fd);
+                continue;
+            }
+            
+            if (!fileExists(full_path)) {
+                string errorMsg = "文件无法访问: " + full_path + " (路径: " + path + ")";
+                cout << "  └─ 错误原因: " << errorMsg << " | ";
+                cout << "响应: 404 Not Found" << endl;
+                
+                string errorPage = generateErrorPage(404, "文件未找到: " + path);
                 string header = generateResponseHeader(404, "text/html; charset=utf-8", errorPage.length());
                 string response = header + errorPage;
                 send(client_fd, response.c_str(), response.length(), 0);
@@ -487,9 +541,11 @@ public:
             
             string file_content = readFile(full_path);
             if (file_content.empty()) {
-                cout << " [500 Internal Server Error]" << endl;
+                string errorMsg = "文件读取失败: " + full_path + " (可能无读取权限或文件为空)";
+                cout << "  └─ 错误原因: " << errorMsg << " | ";
+                cout << "响应: 500 Internal Server Error" << endl;
                 
-                string errorPage = generateErrorPage(500, "读取文件失败");
+                string errorPage = generateErrorPage(500, "服务器内部错误：无法读取文件");
                 string header = generateResponseHeader(500, "text/html; charset=utf-8", errorPage.length());
                 string response = header + errorPage;
                 send(client_fd, response.c_str(), response.length(), 0);
@@ -509,7 +565,10 @@ public:
             
             send(client_fd, response.c_str(), response.length(), 0);
             
-            cout << " [200 OK]" << endl;
+            cout << "  └─ 文件路径: " << full_path << " | ";
+            cout << "内容类型: " << content_type << " | ";
+            cout << "文件大小: " << file_content.length() << " 字节 | ";
+            cout << "响应: 200 OK" << endl;
             
             close(client_fd);
         }
