@@ -286,6 +286,34 @@ private:
         return html.str();
     }
     
+    string processHTMLTemplate(const string& content) {
+        string result = content;
+        
+        string listen_addr = config.getListenAddress();
+        string listen_port_str = to_string(config.getListenPort());
+        string web_root = config.getWebRoot();
+        
+        size_t pos = 0;
+        while ((pos = result.find("{{LISTEN_ADDRESS}}", pos)) != string::npos) {
+            result.replace(pos, 18, listen_addr);
+            pos += listen_addr.length();
+        }
+        
+        pos = 0;
+        while ((pos = result.find("{{LISTEN_PORT}}", pos)) != string::npos) {
+            result.replace(pos, 15, listen_port_str);
+            pos += listen_port_str.length();
+        }
+        
+        pos = 0;
+        while ((pos = result.find("{{WEB_ROOT}}", pos)) != string::npos) {
+            result.replace(pos, 12, web_root);
+            pos += web_root.length();
+        }
+        
+        return result;
+    }
+    
     string normalizePath(const string& path) {
         string normalized = path;
         for (char& c : normalized) {
@@ -488,6 +516,11 @@ public:
             }
             
             string content_type = HTTPResponse::getContentType(full_path);
+            
+            if (content_type.find("text/html") != string::npos) {
+                file_content = processHTMLTemplate(file_content);
+            }
+            
             string header = generateResponseHeader(200, content_type, file_content.length());
             string response = header + file_content;
             
